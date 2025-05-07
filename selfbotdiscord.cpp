@@ -103,7 +103,7 @@ int wmain() {
     }
 
     // --- 2) Read token ---
-    std::cout << "Enter your Discord user token: ";
+    std::cout << "Discord token: ";
     std::string token;
     std::getline(std::cin, token);
     if (token.empty()) return 1;
