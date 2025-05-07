@@ -1,1 +1,2 @@
 # selfbotdiscord
+selfbot for cpp
