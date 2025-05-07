@@ -12,7 +12,7 @@
 #include <mutex>
 #include <ctime>
 
-// Liefert den Ordner, in dem die EXE liegt
+// Returns the folder where the EXE resides
 std::filesystem::path GetExeFolder() {
     wchar_t buf[MAX_PATH];
     DWORD len = GetModuleFileNameW(nullptr, buf, MAX_PATH);
@@ -21,10 +21,10 @@ std::filesystem::path GetExeFolder() {
     return std::filesystem::path(buf).parent_path();
 }
 
-// Absoluter Pfad zu Text.txt neben der EXE
+// Absolute path to Text.txt next to the EXE
 const std::filesystem::path TEXT_PATH = GetExeFolder() / "Text.txt";
 
-// Führt einen HTTP-Request aus und liefert den HTTP-Statuscode zurück
+// Performs an HTTP request and returns the status code
 DWORD HttpRequest(
     HINTERNET session,
     const std::wstring& host,
@@ -46,6 +46,7 @@ DWORD HttpRequest(
         WinHttpCloseHandle(connect);
         return 0;
     }
+
     WinHttpSendRequest(request,
         headers.c_str(), (ULONG)-1,
         (LPVOID)body.data(), (ULONG)body.size(),
@@ -62,7 +63,7 @@ DWORD HttpRequest(
     return status;
 }
 
-// Thread­sicherer Logger mit Zeitstempel HH:MM:SS
+// Thread-safe logger with timestamp HH:MM:SS
 std::mutex cout_mtx;
 void log(const std::string& msg) {
     auto now = std::chrono::system_clock::now();
@@ -74,23 +75,20 @@ void log(const std::string& msg) {
 }
 
 int wmain() {
-    // --- 1) Sicherstellen, dass Text.txt existiert ---
+    // --- 1) Ensure Text.txt exists ---
     if (!std::filesystem::exists(TEXT_PATH)) {
-        // Datei anlegen mit Beispieltext
         std::ofstream out(TEXT_PATH);
         out << "Type your messages here.\n";
 
-        // Meldung ausgeben
-        std::cout << "No Text.txt found – created a new one at:\n"
-            << "  " << TEXT_PATH.string() << "\n\n"
-            << "Please fill it with your messages and press ENTER to exit."
-            << std::endl;
-        // Warten, bis der Benutzer die Konsole schließt
+        std::cout << "No Text.txt found – created at:\n"
+                  << "  " << TEXT_PATH.string() << "\n\n"
+                  << "Please fill it with your messages and press ENTER to exit."
+                  << std::endl;
         std::cin.get();
         return 1;
     }
 
-    // Textdatei in Vektor laden
+    // Load text file into vector
     std::ifstream fin(TEXT_PATH);
     std::vector<std::string> lines;
     std::string line;
@@ -100,17 +98,17 @@ int wmain() {
     fin.close();
     if (lines.empty()) {
         std::cerr << TEXT_PATH.filename().string()
-            << " is empty. Please add at least one line.\n";
+                  << " is empty. Please add at least one line.\n";
         return 1;
     }
 
-    // --- 2) Token einlesen ---
+    // --- 2) Read token ---
     std::cout << "Enter your Discord user token: ";
     std::string token;
     std::getline(std::cin, token);
     if (token.empty()) return 1;
 
-    // --- 3) WinHTTP-Session öffnen & Token validieren ---
+    // --- 3) Open WinHTTP session & validate token ---
     HINTERNET session = WinHttpOpen(
         L"SelfBot/1.0",
         WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
@@ -128,10 +126,12 @@ int wmain() {
     }
     std::cout << "Token validated. Starting...\n\n";
 
-    // --- 4) Channel-ID und Intervalle abfragen ---
+    // --- 4) Ask for Channel ID and intervals ---
     std::cout << "Channel ID: ";
     std::string channel_id;
     std::getline(std::cin, channel_id);
+    std::wstring wChannelId(channel_id.begin(), channel_id.end());
+
     std::cout << "Min interval (s): ";
     int minI, maxI;
     std::cin >> minI;
@@ -139,21 +139,28 @@ int wmain() {
     std::cin >> maxI;
     if (minI >= maxI) return 1;
 
-    // --- 5) Zufalls- oder Sequenziell-Modus abfragen ---
+    // --- 5) Ask for random or sequential mode ---
     std::cout << "Random order? (y/n): ";
     char mode = 'n';
     std::cin >> mode;
     bool random_mode = (mode == 'y' || mode == 'Y');
     std::cout << "\n";
 
-    // --- 6) Nachrichten-Loop im Hintergrundthread ---
-    std::thread([&]() {
+    // --- 6) Ask if messages should be deleted after sending ---
+    std::cout << "Delete after send? (y/n): ";
+    char delMode = 'n';
+    std::cin >> delMode;
+    bool delete_after_send = (delMode == 'y' || delMode == 'Y');
+    std::cout << "\n";
+
+    // --- 7) Message loop in background thread ---
+    std::thread([&, delete_after_send, wChannelId]() {
         std::mt19937_64 rng(std::random_device{}());
         std::uniform_int_distribution<int> dist(minI, maxI);
         size_t index = 0;
         std::string previous;
         while (true) {
-            // Nachricht auswählen
+            // Select message
             std::string msg;
             if (random_mode) {
                 std::vector<std::string> opts;
@@ -169,38 +176,87 @@ int wmain() {
             }
             previous = msg;
 
-            // JSON-Body bauen
+            // Build JSON body
             std::string body = "{\"content\":\"";
             for (char c : msg)
                 body += (c == '"') ? "\\\"" : std::string(1, c);
             body += "\"}";
 
-            // Absenden
-            std::wstring path = L"/api/v10/channels/" +
-                std::wstring(channel_id.begin(), channel_id.end()) +
-                L"/messages";
-            long code = HttpRequest(
-                session, L"discord.com", path, L"POST",
-                authHdr + L"Content-Type: application/json\r\n",
-                body
+            // Send POST request
+            HINTERNET connect = WinHttpConnect(session, L"discord.com",
+                INTERNET_DEFAULT_HTTPS_PORT, 0);
+            HINTERNET request = WinHttpOpenRequest(
+                connect, L"POST",
+                (L"/api/v10/channels/" + wChannelId + L"/messages").c_str(),
+                nullptr, WINHTTP_NO_REFERER,
+                WINHTTP_DEFAULT_ACCEPT_TYPES,
+                WINHTTP_FLAG_SECURE
             );
-            if (code == 200 || code == 201)
-                log("Sent: \"" + msg + '"');
-            else
-                log("Error sending (HTTP " + std::to_string(code) + ")");
+            WinHttpSendRequest(request,
+                (authHdr + L"Content-Type: application/json\r\n").c_str(), (ULONG)-1,
+                (LPVOID)body.data(), (ULONG)body.size(),
+                (ULONG)body.size(), 0);
+            WinHttpReceiveResponse(request, nullptr);
 
-            // Countdown
-            for (int i = dist(rng); i > 0; --i) {
+            // Get status code
+            DWORD status = 0, len = sizeof(status);
+            WinHttpQueryHeaders(request,
+                WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
+                nullptr, &status, &len, nullptr);
+
+            if (status == 200 || status == 201) {
+                log("Sent: \"" + msg + '"');
+
+                // If delete-after-send enabled, extract ID and send DELETE
+                if (delete_after_send) {
+                    // Read response body
+                    std::string response;
+                    DWORD avail = 0;
+                    while (WinHttpQueryDataAvailable(request, &avail) && avail > 0) {
+                        std::vector<char> buffer(avail);
+                        DWORD read = 0;
+                        WinHttpReadData(request, buffer.data(), avail, &read);
+                        response.append(buffer.data(), read);
+                    }
+                    // Extract message ID
+                    std::string id;
+                    auto pos = response.find("\"id\":\"");
+                    if (pos != std::string::npos) {
+                        pos += 6;
+                        auto end = response.find('"', pos);
+                        if (end != std::string::npos)
+                            id = response.substr(pos, end - pos);
+                    }
+                    // Send DELETE request
+                    if (!id.empty()) {
+                        std::wstring delPath = L"/api/v10/channels/" + wChannelId + L"/messages/" +
+                                               std::wstring(id.begin(), id.end());
+                        HttpRequest(session, L"discord.com", delPath, L"DELETE",
+                                    authHdr, std::string());
+                        log("Deleted: message ID " + id);
+                    }
+                }
+            }
+            else {
+                log("Error sending (HTTP " + std::to_string(status) + ")");
+            }
+
+            WinHttpCloseHandle(request);
+            WinHttpCloseHandle(connect);
+
+            // Countdown to next message
+            int wait = dist(rng);
+            for (int i = wait; i > 0; --i) {
                 std::lock_guard<std::mutex> lock(cout_mtx);
                 std::cout << "\rNext in " << i << "s...   " << std::flush;
                 std::this_thread::sleep_for(std::chrono::seconds(1));
             }
             std::lock_guard<std::mutex> lock(cout_mtx);
-            std::cout << "\r                     \r";
+            std::cout << "\r                         \r";
         }
-        }).detach();
+    }).detach();
 
-    // Hauptthread schläft, damit das Programm weiterläuft
+    // Keep main thread alive
     std::this_thread::sleep_for(std::chrono::hours(24 * 365));
     return 0;
 }
